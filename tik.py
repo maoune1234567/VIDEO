@@ -5,11 +5,10 @@ import logging
 import asyncio
 from pathlib import Path
 from functools import wraps
+from threading import Thread
 
-from telegram import (
-    Update, ChatMember, BotCommand,
-    ReplyKeyboardMarkup, KeyboardButton
-)
+from flask import Flask
+from telegram import Update, ChatMember, BotCommand, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -25,7 +24,7 @@ from dotenv import load_dotenv
 # تحميل إعدادات البيئة من .env
 # —————————————————————————————————————————
 load_dotenv()
-TOKEN            = os.getenv("TELEGRAM_BOT_TOKEN")       # توكن بوت تيليجرام
+TOKEN            = os.getenv("TELEGRAM_BOT_TOKEN")
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@yourchannel")
 DOWNLOAD_DIR     = Path(os.getenv("DOWNLOAD_DIR", "downloads"))
 CACHE_DIR        = Path(os.getenv("CACHE_DIR", "cache"))
@@ -36,7 +35,24 @@ DOWNLOAD_DIR.mkdir(exist_ok=True)
 CACHE_DIR.mkdir(exist_ok=True)
 
 # —————————————————————————————————————————
-# لوجر
+# Flask Keep-Alive Web Server
+# —————————————————————————————————————————
+flask_app = Flask(__name__)
+
+@flask_app.route("/")
+def home():
+    return "✅ Bot is running!"
+
+def run_flask():
+    flask_app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+
+def keep_alive():
+    t = Thread(target=run_flask)
+    t.daemon = True
+    t.start()
+
+# —————————————————————————————————————————
+# Logging
 # —————————————————————————————————————————
 logging.basicConfig(
     format="%(asctime)s %(levelname)s ▶ %(message)s",
@@ -66,7 +82,7 @@ def require_channel_membership(channel_username: str):
                     chat_id=channel_username,
                     user_id=update.effective_user.id
                 )
-            except:
+            except Exception:
                 return await update.message.reply_text(
                     "❌ لا يمكن التحقق من اشتراكك؛ تأكد من إضافة البوت كمسؤول."
                 )
@@ -96,7 +112,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_sessions[update.effective_user.id] = None
 
 # —————————————————————————————————————————
-# دالة تحميل عامة باستخدام yt_dlp (تعمل على تيك توك، يوتيوب، إنستغرام...)
+# دالة تحميل عامة باستخدام yt_dlp
 # —————————————————————————————————————————
 async def download_video(url: str) -> Path:
     if url in cache:
@@ -122,7 +138,7 @@ async def download_video(url: str) -> Path:
     return path
 
 # —————————————————————————————————————————
-# معالج الرسائل: يختار المنصة ثم يحمّل الفيديو
+# معالج الرسائل
 # —————————————————————————————————————————
 @require_channel_membership(CHANNEL_USERNAME)
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -130,26 +146,21 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt     = update.message.text.strip()
     chat_id = update.effective_chat.id
 
-    # إذا هو اختيار المنصة
     if txt in ("تيك توك", "يوتيوب", "إنستغرام") and uid in user_sessions:
         user_sessions[uid] = txt
         return await update.message.reply_text(f"✅ اخترت {txt}. الآن أرسل الرابط:")
 
-    # تأكد أنه اختار أولاً
     if uid not in user_sessions or not user_sessions[uid]:
         return await update.message.reply_text("⇨ لازم تختار المنصة أولاً بإرسال /start")
 
-    # هذا النص هو الرابط
     url = txt
 
-    # تنزيل الفيديو عبر yt_dlp
     try:
         video_path = await download_video(url)
     except Exception as e:
         logger.exception("Download error")
         return await update.message.reply_text(f"❌ فشل التحميل: {e}")
 
-    # إرسال الفيديو
     try:
         with open(video_path, "rb") as f:
             await ctx.bot.send_video(chat_id, video=f)
@@ -157,13 +168,15 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         logger.exception("Send error")
         await update.message.reply_text("سيتم تحميل الفيديو ✅")
 
-    # مسح الجلسة لإعادة اختيار منصة
     user_sessions.pop(uid, None)
 
 # —————————————————————————————————————————
 # نقطة الدخول الرئيسية
 # —————————————————————————————————————————
 if __name__ == "__main__":
+    # Start Flask keep-alive server
+    keep_alive()
+
     async def on_startup(app):
         await app.bot.set_my_commands([BotCommand("start", "ابدأ البوت")])
 
@@ -175,5 +188,6 @@ if __name__ == "__main__":
     )
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
     logger.info("🚀 Bot is running...")
     app.run_polling()
