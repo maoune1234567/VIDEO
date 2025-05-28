@@ -61,17 +61,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # —————————————————————————————————————————
-# كاش لمنع إعادة تحميل نفس الرابط
+# Cache to avoid re-downloading same URL
 # —————————————————————————————————————————
 cache = diskcache.Cache(str(CACHE_DIR), size_limit=MAX_CACHE_SIZE)
 
 # —————————————————————————————————————————
-# جلسات المستخدم في الذاكرة
+# In-memory user sessions
 # —————————————————————————————————————————
 user_sessions = {}  # { user_id: platform_choice }
 
 # —————————————————————————————————————————
-# ديكوريتور للتحقق من اشتراك المستخدم في القناة
+# Decorator to enforce channel membership
 # —————————————————————————————————————————
 def require_channel_membership(channel_username: str):
     def decorator(func):
@@ -95,7 +95,7 @@ def require_channel_membership(channel_username: str):
     return decorator
 
 # —————————————————————————————————————————
-# أمر /start لإظهار خيارات المنصات
+# /start command handler
 # —————————————————————————————————————————
 @require_channel_membership(CHANNEL_USERNAME)
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -112,7 +112,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_sessions[update.effective_user.id] = None
 
 # —————————————————————————————————————————
-# دالة تحميل عامة باستخدام yt_dlp
+# Video download via yt_dlp
 # —————————————————————————————————————————
 async def download_video(url: str) -> Path:
     if url in cache:
@@ -138,7 +138,19 @@ async def download_video(url: str) -> Path:
     return path
 
 # —————————————————————————————————————————
-# معالج الرسائل
+# Background task: download & send
+# —————————————————————————————————————————
+async def process_download_and_send(url: str, chat_id: int, bot):
+    try:
+        video_path = await download_video(url)
+        with open(video_path, "rb") as f:
+            await bot.send_video(chat_id, video=f)
+    except Exception as e:
+        logger.exception("Background download error")
+        await bot.send_message(chat_id, text=f"❌ فشل التحميل: {e}")
+
+# —————————————————————————————————————————
+# Message handler
 # —————————————————————————————————————————
 @require_channel_membership(CHANNEL_USERNAME)
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -146,32 +158,26 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt     = update.message.text.strip()
     chat_id = update.effective_chat.id
 
+    # Platform selection
     if txt in ("تيك توك", "يوتيوب", "إنستغرام") and uid in user_sessions:
         user_sessions[uid] = txt
         return await update.message.reply_text(f"✅ اخترت {txt}. الآن أرسل الرابط:")
 
+    # Ensure platform was chosen
     if uid not in user_sessions or not user_sessions[uid]:
         return await update.message.reply_text("⇨ لازم تختار المنصة أولاً بإرسال /start")
 
     url = txt
 
-    try:
-        video_path = await download_video(url)
-    except Exception as e:
-        logger.exception("Download error")
-        return await update.message.reply_text(f"❌ فشل التحميل: {e}")
+    # Acknowledge and start download in background
+    await update.message.reply_text("⏳ جاري التحميل في الخلفية، سأرسله لك عند الانتهاء…")
+    asyncio.create_task(process_download_and_send(url, chat_id, ctx.bot))
 
-    try:
-        with open(video_path, "rb") as f:
-            await ctx.bot.send_video(chat_id, video=f)
-    except Exception:
-        logger.exception("Send error")
-        await update.message.reply_text("سيتم تحميل الفيديو ✅")
-
+    # Reset session for next use
     user_sessions.pop(uid, None)
 
 # —————————————————————————————————————————
-# نقطة الدخول الرئيسية
+# Entry point
 # —————————————————————————————————————————
 if __name__ == "__main__":
     # Start Flask keep-alive server
