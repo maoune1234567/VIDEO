@@ -1,0 +1,4 @@
+python-telegram-bot>=20.0
+yt-dlp>=2025.05.28
+diskcache>=5.6.1
+python-dotenv>=1.0.0
